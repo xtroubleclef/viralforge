@@ -407,7 +407,6 @@ Keep slide text short - it appears on screen.
 Create as many slides as needed to cover the full script."""
     return parse_claude_json(call_claude(prompt))
 
-
 # ════════════════════════════════════════════════════
 # MAIN PIPELINE
 # ════════════════════════════════════════════════════
@@ -422,4 +421,247 @@ def run_pipeline(script_data: dict, label: str):
     voice_id = VOICE_MAP[voice]
     fname = safe_filename(script_data["title"])
 
-    with tempfile.TemporaryDirectory
+    with tempfile.TemporaryDirectory() as work_dir:
+
+        # Step 1: Voice
+        status.info("🎙️ Generating voiceover...")
+        progress.progress(20)
+        audio_path = os.path.join(work_dir, "voice.mp3")
+        try:
+            generate_voice(
+                script_data["full_voiceover"],
+                voice_id,
+                audio_path
+            )
+        except Exception as e:
+            st.error(f"Voice failed: {e}")
+            return
+
+        # Step 2: Background
+        status.info("🎬 Fetching background...")
+        progress.progress(40)
+        bg_path = None
+        if bg_style == "Stock footage":
+            bg_path = os.path.join(work_dir, "bg.mp4")
+            bg_path = fetch_background(
+                template["search"], bg_path
+            )
+
+        # Step 3: Build video
+        status.info("🎞️ Assembling video...")
+        progress.progress(60)
+        output_path = str(output_dir / f"{fname}.mp4")
+        try:
+            build_video(
+                slides=script_data["slides"],
+                audio_path=audio_path,
+                bg_path=bg_path,
+                template=template,
+                output_path=output_path,
+                work_dir=work_dir
+            )
+        except Exception as e:
+            st.error(f"Video build failed: {e}")
+            return
+
+        # Step 4: Done
+        progress.progress(100)
+        status.success(f"✅ Done: {script_data['title']}")
+
+        with st.expander("📄 Script Details"):
+            st.write(f"**Title:** {script_data['title']}")
+            st.write(f"**Hook:** {script_data.get('hook_angle','')}")
+            st.write(f"**Description:** {script_data['description']}")
+            st.write(f"**Tags:** {', '.join(script_data['tags'])}")
+
+        with open(output_path, "rb") as f:
+            st.download_button(
+                "⬇️ Download Video",
+                f,
+                file_name=f"{fname}.mp4",
+                mime="video/mp4"
+            )
+
+
+# ════════════════════════════════════════════════════
+# TAB 1: SCRIPT MODE
+# ════════════════════════════════════════════════════
+with tab1:
+    st.header("Your Script → Your Video")
+    st.caption("You write it. The pipeline builds it.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("📝 Your Script")
+        script_input = st.text_area(
+            "script",
+            height=350,
+            placeholder="""[HOOK]
+Everyone says to use AI for productivity.
+They're wrong about how.
+duration: 3s
+emphasis: high
+
+[POINT 1]
+Most people use ChatGPT like Google.
+That's the worst way to use it.
+duration: 8s
+
+[STAT]
+I cut my writing time by 70%.
+Not by asking AI to write for me.
+duration: 5s
+emphasis: high
+
+[CTA]
+Try it on your next piece of work.
+Tell me what breaks.
+duration: 4s""",
+            label_visibility="collapsed"
+        )
+        video_title = st.text_input(
+            "Video title",
+            placeholder="Why I stopped using AI the way everyone says to"
+        )
+
+    with col2:
+        st.subheader("🎨 Visual Brief (optional)")
+        visual_input = st.text_area(
+            "visual",
+            height=350,
+            placeholder="""[HOOK]
+visual: black screen, single word "Wrong."
+feel: stark, confident
+
+[POINT 1]
+visual: split screen, wrong way vs right way
+feel: clear contrast
+
+[STAT]
+visual: big number 70% center screen
+feel: let it breathe
+
+[CTA]
+visual: just text, no clutter
+feel: direct, like a text message""",
+            label_visibility="collapsed"
+        )
+
+    st.divider()
+
+    if st.button(
+        "🎬 Generate Video",
+        type="primary",
+        disabled=not keys_ready,
+        use_container_width=True
+    ):
+        if not script_input.strip():
+            st.error("Add your script first")
+        else:
+            with st.spinner("Working..."):
+                try:
+                    script_data = script_from_user(
+                        script_input,
+                        visual_input,
+                        video_title,
+                        niche
+                    )
+                    run_pipeline(script_data, "Script Mode")
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+
+
+# ════════════════════════════════════════════════════
+# TAB 2: TOPIC MODE
+# ════════════════════════════════════════════════════
+with tab2:
+    st.header("Topic → Automated Video")
+    st.caption("Type a topic. Get a video.")
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        topics_input = st.text_area(
+            "Topics (one per line)",
+            height=200,
+            placeholder="""Why most people use AI wrong
+The productivity system nobody talks about
+5 tools that replaced my entire workflow"""
+        )
+
+    with col2:
+        st.subheader("Settings")
+        videos_per_run = st.slider(
+            "Videos to generate", 1, 10, 1
+        )
+        your_style = st.text_area(
+            "Your style (optional)",
+            height=100,
+            placeholder="""Direct, skip the fluff.
+Specific examples not vague claims.
+Skeptical of hype."""
+        )
+        cost = videos_per_run * 0.22
+        st.info(f"Est. cost: ${cost:.2f}")
+
+    st.divider()
+
+    if st.button(
+        "🤖 Generate Videos",
+        type="primary",
+        disabled=not keys_ready,
+        use_container_width=True
+    ):
+        topics = [
+            t.strip() for t in topics_input.split("\n")
+            if t.strip()
+        ]
+        if not topics:
+            st.error("Add at least one topic")
+        else:
+            for topic in topics[:videos_per_run]:
+                st.subheader(f"📹 {topic}")
+                try:
+                    script_data = script_from_topic(
+                        topic, your_style, niche
+                    )
+                    run_pipeline(script_data, topic)
+                except Exception as e:
+                    st.error(f"Failed on '{topic}': {e}")
+
+
+# ════════════════════════════════════════════════════
+# TAB 3: HISTORY
+# ════════════════════════════════════════════════════
+with tab3:
+    st.header("Generated Videos")
+
+    output_dir = Path("output")
+    if output_dir.exists():
+        videos = sorted(
+            output_dir.glob("*.mp4"),
+            key=os.path.getmtime,
+            reverse=True
+        )
+
+        if videos:
+            for video_path in videos[:20]:
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    size = video_path.stat().st_size
+                    st.write(f"🎬 {video_path.stem}")
+                    st.caption(f"{size/1024/1024:.1f} MB")
+                with col2:
+                    with open(video_path, "rb") as f:
+                        st.download_button(
+                            "⬇️ Download",
+                            f,
+                            file_name=video_path.name,
+                            mime="video/mp4",
+                            key=str(video_path)
+                        )
+        else:
+            st.info("No videos yet.")
+    else:
+        st.info("No videos yet.")
