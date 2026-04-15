@@ -139,7 +139,7 @@ def safe_filename(title: str) -> str:
     )[:50].strip().replace(" ", "_")
 
 
-def fetch_background(search: str, output_path: str) -> str | None:
+def fetch_background(search: str, output_path: str):
     try:
         r = requests.get(
             "https://api.pexels.com/videos/search",
@@ -268,7 +268,7 @@ def generate_voice(text: str, voice_id: str,
 def build_video(
     slides: list,
     audio_path: str,
-    bg_path: str | None,
+    bg_path,
     template: dict,
     output_path: str,
     work_dir: str
