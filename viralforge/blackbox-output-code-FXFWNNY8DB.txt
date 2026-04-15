@@ -1,0 +1,9 @@
+anthropic
+requests
+Pillow
+streamlit
+python-dotenv
+google-api-python-client
+google-auth-oauthlib
+openai-whisper
+ffmpeg-python
