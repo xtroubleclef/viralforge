@@ -1,10 +1,14 @@
 import streamlit as st
 import os
 import json
-import tempfile
-import shutil
+import subprocess
+import requests
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
+import anthropic
+import tempfile
+import time
 
 load_dotenv()
 
@@ -15,418 +19,407 @@ st.set_page_config(
     layout="wide"
 )
 
-# ── sidebar: api keys ────────────────────────────────
+# ── constants ────────────────────────────────────────
+WIDTH, HEIGHT, FPS = 1920, 1080, 30
+
+TEMPLATES = {
+    "tech": {
+        "bg": (10, 10, 10),
+        "text": (0, 255, 136),
+        "accent": (0, 102, 255),
+        "font_size": 72,
+        "search": "technology abstract dark"
+    },
+    "finance": {
+        "bg": (10, 15, 30),
+        "text": (255, 215, 0),
+        "accent": (0, 204, 102),
+        "font_size": 68,
+        "search": "city skyline night"
+    },
+    "productivity": {
+        "bg": (26, 26, 46),
+        "text": (255, 255, 255),
+        "accent": (233, 69, 96),
+        "font_size": 70,
+        "search": "minimal desk workspace"
+    },
+    "health": {
+        "bg": (10, 30, 20),
+        "text": (100, 255, 150),
+        "accent": (0, 200, 100),
+        "font_size": 70,
+        "search": "nature green wellness"
+    },
+    "gaming": {
+        "bg": (15, 10, 30),
+        "text": (180, 100, 255),
+        "accent": (255, 50, 100),
+        "font_size": 70,
+        "search": "gaming setup neon"
+    },
+    "education": {
+        "bg": (20, 20, 35),
+        "text": (255, 255, 255),
+        "accent": (100, 150, 255),
+        "font_size": 68,
+        "search": "library books study"
+    }
+}
+
+VOICE_MAP = {
+    "Rachel (F, calm)":    "21m00Tcm4TlvDq8ikWAM",
+    "Adam (M, confident)": "pNInz6obpgDQGcFmaJgB",
+    "Domi (F, energetic)": "AZnzlk1XvdvUeBnXmlld",
+    "Bella (F, warm)":     "EXAVITQu4vr4xnSDxMaL"
+}
+
+# ── sidebar ──────────────────────────────────────────
 with st.sidebar:
     st.title("🎬 ViralForge")
     st.caption("Script → Voice → Video → Done")
-    
     st.divider()
+
     st.subheader("API Keys")
-    
     anthropic_key = st.text_input(
         "Anthropic Key",
         value=os.getenv("ANTHROPIC_API_KEY", ""),
-        type="password",
-        help="anthropic.com → API Keys"
+        type="password"
     )
     elevenlabs_key = st.text_input(
         "ElevenLabs Key",
         value=os.getenv("ELEVENLABS_API_KEY", ""),
-        type="password",
-        help="elevenlabs.io → Profile → API Key"
+        type="password"
     )
     pexels_key = st.text_input(
         "Pexels Key",
         value=os.getenv("PEXELS_API_KEY", ""),
-        type="password",
-        help="pexels.com/api → free"
+        type="password"
     )
-    
+
     st.divider()
-    st.subheader("Video Settings")
-    
+    st.subheader("Settings")
+
     niche = st.selectbox(
         "Niche",
-        ["tech", "finance", "productivity", 
+        ["tech", "finance", "productivity",
          "health", "gaming", "education"]
     )
-    
     voice = st.selectbox(
         "Voice",
-        ["Rachel (F, calm)", 
-         "Adam (M, confident)",
-         "Domi (F, energetic)",
-         "Bella (F, warm)"]
+        list(VOICE_MAP.keys())
     )
-    
-    resolution = st.selectbox(
-        "Resolution",
-        ["1920x1080 (YouTube)", 
-         "1080x1920 (Shorts/TikTok)"]
+    bg_style = st.selectbox(
+        "Background",
+        ["Stock footage", "Pure black", "Dark gradient"]
     )
-    
-    keys_ready = all([anthropic_key, 
-                      elevenlabs_key, 
-                      pexels_key])
-    
-    if keys_ready:
-        st.success("✅ Ready to generate")
-    else:
-        st.warning("⚠️ Add API keys to start")
 
-# ── main tabs ────────────────────────────────────────
+    keys_ready = all([anthropic_key, elevenlabs_key, pexels_key])
+
+    st.divider()
+    if keys_ready:
+        st.success("✅ Ready")
+    else:
+        st.warning("⚠️ Add API keys")
+
+# ── tabs ─────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs([
-    "✍️  Script Mode", 
+    "✍️ Script Mode",
     "🤖 Topic Mode",
-    "📊 History"
+    "📂 History"
 ])
 
 # ════════════════════════════════════════════════════
-# TAB 1: SCRIPT MODE
+# HELPERS
 # ════════════════════════════════════════════════════
-with tab1:
-    st.header("Your Script → Your Video")
-    st.caption("You write it. The pipeline builds it.")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("📝 Your Script")
-        st.caption("Write exactly how you'd say it")
-        
-        script_input = st.text_area(
-            "Script",
-            height=400,
-            placeholder="""[HOOK]
-Everyone says to use AI for productivity.
-They're wrong about how.
-duration: 3s
-emphasis: high
 
-[POINT 1]
-Most people use ChatGPT like Google.
-They ask it questions and take the answer.
-That's the worst way to use it.
-duration: 8s
-emphasis: low
+def safe_filename(title: str) -> str:
+    return "".join(
+        c for c in title if c.isalnum() or c in " -_"
+    )[:50].strip().replace(" ", "_")
 
-[STAT]
-I cut my writing time by 70%.
-Not by asking AI to write for me.
-duration: 5s
-emphasis: high
 
-[CTA]
-Try it on your next piece of work.
-Tell me what breaks.
-duration: 4s
-emphasis: medium""",
-            label_visibility="collapsed"
+def fetch_background(search: str, output_path: str) -> str | None:
+    try:
+        r = requests.get(
+            "https://api.pexels.com/videos/search",
+            headers={"Authorization": pexels_key},
+            params={"query": search, "per_page": 3,
+                    "orientation": "landscape"},
+            timeout=15
         )
-        
-        video_title = st.text_input(
-            "Video Title",
-            placeholder="Why I stopped using AI the way everyone says to"
+        videos = r.json().get("videos", [])
+        if not videos:
+            return None
+
+        files = videos[0]["video_files"]
+        hd = next(
+            (f for f in files if f["quality"] == "hd"),
+            files[0]
         )
-    
-    with col2:
-        st.subheader("🎨 Visual Brief")
-        st.caption("Describe what you want people to see")
-        
-        visual_input = st.text_area(
-            "Visual Brief",
-            height=400,
-            placeholder="""[HOOK]
-visual: black screen, single word "Wrong."
-feel: stark, confident, not trying hard
 
-[POINT 1]
-visual: split screen, left side normal 
-ChatGPT use, right side red X
-feel: this is what not to do
+        video_data = requests.get(hd["link"], stream=True, timeout=30)
+        with open(output_path, "wb") as f:
+            for chunk in video_data.iter_content(8192):
+                f.write(chunk)
+        return output_path
+    except Exception as e:
+        st.warning(f"Background fetch failed: {e}")
+        return None
 
-[STAT]
-visual: big number "70%" center screen
-below: smaller text "less time writing"
-feel: let the number breathe
 
-[CTA]
-visual: just text, no background noise
-feel: direct, like a friend texting you""",
-            label_visibility="collapsed"
+def make_slide(
+    text: str,
+    template: dict,
+    slide_num: int,
+    total: int,
+    emphasis: bool,
+    output_path: str
+) -> str:
+    img = Image.new("RGB", (WIDTH, HEIGHT), template["bg"])
+    draw = ImageDraw.Draw(img)
+
+    font_size = template["font_size"] + (20 if emphasis else 0)
+
+    try:
+        font = ImageFont.truetype(
+            "/System/Library/Fonts/Helvetica.ttc", font_size
         )
-        
-        st.subheader("🎯 Style")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            bg_style = st.selectbox(
-                "Background",
-                ["Dark minimal", 
-                 "Stock footage",
-                 "Pure black",
-                 "Pure white",
-                 "Gradient"]
-            )
-        with col_b:
-            caption_style = st.selectbox(
-                "Captions",
-                ["Synced word-by-word",
-                 "Slide text only",
-                 "None"]
-            )
-    
-    st.divider()
-    
-    generate_script_btn = st.button(
-        "🎬 Generate Video From My Script",
-        type="primary",
-        disabled=not keys_ready,
-        use_container_width=True
+        small_font = ImageFont.truetype(
+            "/System/Library/Fonts/Helvetica.ttc", 28
+        )
+    except Exception:
+        font = ImageFont.load_default()
+        small_font = font
+
+    accent = template["accent"]
+    text_color = template["text"]
+
+    # Top bar
+    draw.rectangle([(0, 0), (WIDTH, 8)], fill=accent)
+
+    # Progress bar
+    progress = (slide_num + 1) / total
+    draw.rectangle([(0, HEIGHT - 8), (WIDTH, HEIGHT)],
+                   fill=(40, 40, 40))
+    draw.rectangle(
+        [(0, HEIGHT - 8), (int(WIDTH * progress), HEIGHT)],
+        fill=accent
     )
-    
-    if generate_script_btn:
-        if not script_input:
-            st.error("Add your script first")
-        else:
-            run_pipeline(
-                mode="script",
-                script_text=script_input,
-                visual_text=visual_input,
-                title=video_title,
-                niche=niche,
-                voice=voice,
-                resolution=resolution,
-                bg_style=bg_style,
-                caption_style=caption_style,
-                anthropic_key=anthropic_key,
-                elevenlabs_key=elevenlabs_key,
-                pexels_key=pexels_key
-            )
 
-# ════════════════════════════════════════════════════
-# TAB 2: TOPIC MODE
-# ════════════════════════════════════════════════════
-with tab2:
-    st.header("Topic → Automated Video")
-    st.caption("Fully automated. Good for volume.")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        topics_input = st.text_area(
-            "Topics (one per line)",
-            height=200,
-            placeholder="""Why most people use AI wrong
-The productivity system nobody talks about
-5 tools that replaced my entire workflow
-Why expensive keyboards are a scam
-The morning routine that actually works"""
-        )
-    
-    with col2:
-        st.subheader("Batch Settings")
-        
-        videos_per_run = st.slider(
-            "Videos to generate",
-            min_value=1,
-            max_value=20,
-            value=3
-        )
-        
-        your_style = st.text_area(
-            "Your style (optional but recommended)",
-            height=120,
-            placeholder="""Direct, skip the fluff.
-Use specific examples not vague claims.
-Skeptical of hype, call things out.
-Swear occasionally (mild)."""
-        )
-        
-        cost_estimate = videos_per_run * 0.22
-        st.info(f"Est. cost: ${cost_estimate:.2f}")
-    
-    generate_topic_btn = st.button(
-        "🤖 Generate Videos",
-        type="primary",
-        disabled=not keys_ready,
-        use_container_width=True
+    # Word wrap
+    words = text.split()
+    lines, line = [], []
+    for word in words:
+        line.append(word)
+        bbox = draw.textbbox((0, 0), " ".join(line), font=font)
+        if bbox[2] > WIDTH - 160:
+            line.pop()
+            if line:
+                lines.append(" ".join(line))
+            line = [word]
+    if line:
+        lines.append(" ".join(line))
+
+    # Center text
+    line_h = font_size + 16
+    total_h = len(lines) * line_h
+    y = (HEIGHT - total_h) // 2
+
+    for ln in lines:
+        bbox = draw.textbbox((0, 0), ln, font=font)
+        x = (WIDTH - (bbox[2] - bbox[0])) // 2
+        draw.text((x + 3, y + 3), ln, font=font,
+                  fill=(0, 0, 0))
+        draw.text((x, y), ln, font=font, fill=text_color)
+        y += line_h
+
+    img.save(output_path, "PNG")
+    return output_path
+
+
+def generate_voice(text: str, voice_id: str,
+                   output_path: str) -> str:
+    response = requests.post(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+        headers={
+            "xi-api-key": elevenlabs_key,
+            "Content-Type": "application/json"
+        },
+        json={
+            "text": text,
+            "model_id": "eleven_turbo_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75
+            }
+        },
+        timeout=30
     )
-    
-    if generate_topic_btn:
-        topics = [t.strip() for t in 
-                  topics_input.split("\n") 
-                  if t.strip()]
-        
-        if not topics:
-            st.error("Add at least one topic")
-        else:
-            topics_to_run = topics[:videos_per_run]
-            
-            for i, topic in enumerate(topics_to_run):
-                st.subheader(f"Video {i+1}: {topic}")
-                run_pipeline(
-                    mode="topic",
-                    topic=topic,
-                    your_style=your_style,
-                    niche=niche,
-                    voice=voice,
-                    resolution=resolution,
-                    anthropic_key=anthropic_key,
-                    elevenlabs_key=elevenlabs_key,
-                    pexels_key=pexels_key
-                )
 
-# ════════════════════════════════════════════════════
-# TAB 3: HISTORY
-# ════════════════════════════════════════════════════
-with tab3:
-    st.header("Generated Videos")
-    
-    output_dir = Path("output")
-    if output_dir.exists():
-        videos = list(output_dir.glob("*.mp4"))
-        
-        if videos:
-            for video_path in sorted(
-                videos, 
-                key=os.path.getmtime, 
-                reverse=True
-            )[:10]:
-                col1, col2, col3 = st.columns([3,1,1])
-                
-                with col1:
-                    st.write(f"🎬 {video_path.stem}")
-                    size = video_path.stat().st_size
-                    st.caption(f"{size/1024/1024:.1f} MB")
-                
-                with col2:
-                    with open(video_path, "rb") as f:
-                        st.download_button(
-                            "⬇️ Download",
-                            f,
-                            file_name=video_path.name,
-                            mime="video/mp4",
-                            key=str(video_path)
-                        )
-                
-                with col3:
-                    st.button(
-                        "📤 Upload to YT",
-                        key=f"upload_{video_path}",
-                        disabled=True,
-                        help="Coming soon"
-                    )
-        else:
-            st.info("No videos yet. Generate some first.")
+    if response.status_code != 200:
+        raise Exception(f"ElevenLabs error: {response.text}")
+
+    with open(output_path, "wb") as f:
+        f.write(response.content)
+    return output_path
+
+
+def build_video(
+    slides: list,
+    audio_path: str,
+    bg_path: str | None,
+    template: dict,
+    output_path: str,
+    work_dir: str
+) -> str:
+    slide_files = []
+
+    for i, slide in enumerate(slides):
+        slide_path = os.path.join(work_dir, f"slide_{i:03d}.png")
+        make_slide(
+            text=slide["text"],
+            template=template,
+            slide_num=i,
+            total=len(slides),
+            emphasis=slide.get("emphasis", False),
+            output_path=slide_path
+        )
+        slide_files.append((slide_path, slide.get("duration", 4)))
+
+    # Concat file
+    concat_path = os.path.join(work_dir, "concat.txt")
+    with open(concat_path, "w") as f:
+        for path, dur in slide_files:
+            f.write(f"file '{path}'\n")
+            f.write(f"duration {dur}\n")
+
+    # Slides → video
+    slides_mp4 = os.path.join(work_dir, "slides.mp4")
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", concat_path,
+        "-vf", f"scale={WIDTH}:{HEIGHT},format=yuv420p",
+        "-r", str(FPS),
+        slides_mp4
+    ], check=True, capture_output=True)
+
+    # Final assembly
+    if bg_path and os.path.exists(bg_path):
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-stream_loop", "-1", "-i", bg_path,
+            "-i", slides_mp4,
+            "-i", audio_path,
+            "-filter_complex",
+            "[0:v]scale=1920:1080[bg];"
+            "[1:v]format=rgba,colorchannelmixer=aa=0.85[ov];"
+            "[bg][ov]overlay=0:0[v]",
+            "-map", "[v]", "-map", "2:a",
+            "-shortest",
+            "-c:v", "libx264", "-c:a", "aac",
+            "-crf", "23", output_path
+        ], check=True, capture_output=True)
     else:
-        st.info("No videos yet. Generate some first.")
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", slides_mp4,
+            "-i", audio_path,
+            "-c:v", "libx264", "-c:a", "aac",
+            "-shortest", output_path
+        ], check=True, capture_output=True)
+
+    return output_path
+
+
+def call_claude(prompt: str) -> str:
+    client = anthropic.Anthropic(api_key=anthropic_key)
+    response = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.content[0].text
+
+
+def parse_claude_json(raw: str) -> dict:
+    if "```json" in raw:
+        raw = raw.split("```json")[1].split("```")[0]
+    elif "```" in raw:
+        raw = raw.split("```")[1].split("```")[0]
+    return json.loads(raw.strip())
+
+
+def script_from_topic(topic: str, style: str,
+                      niche: str) -> dict:
+    prompt = f"""Write a 60-second YouTube script about: "{topic}"
+Niche: {niche}
+{f'Creator style: {style}' if style else ''}
+
+Return ONLY valid JSON:
+{{
+    "title": "compelling title under 60 chars",
+    "description": "150 word YouTube description",
+    "tags": ["tag1","tag2","tag3","tag4","tag5"],
+    "hook_angle": "what makes this surprising or different",
+    "slides": [
+        {{"text": "hook 6 words max", "duration": 3, "emphasis": true}},
+        {{"text": "point one 8 words max", "duration": 5, "emphasis": false}},
+        {{"text": "point two 8 words max", "duration": 5, "emphasis": false}},
+        {{"text": "point three 8 words max", "duration": 5, "emphasis": false}},
+        {{"text": "surprising stat or fact", "duration": 4, "emphasis": true}},
+        {{"text": "subscribe for more", "duration": 3, "emphasis": false}}
+    ],
+    "full_voiceover": "complete natural spoken script 120 words"
+}}"""
+    return parse_claude_json(call_claude(prompt))
+
+
+def script_from_user(script_text: str, visual_text: str,
+                     title: str, niche: str) -> dict:
+    prompt = f"""Structure this into a YouTube video script.
+
+USER'S SCRIPT:
+{script_text}
+
+USER'S VISUAL NOTES:
+{visual_text if visual_text else "Use good judgment based on the script"}
+
+TITLE: {title if title else "Generate a good title"}
+NICHE: {niche}
+
+Return ONLY valid JSON:
+{{
+    "title": "{title if title else 'generated title'}",
+    "description": "150 word YouTube description",
+    "tags": ["tag1","tag2","tag3","tag4","tag5"],
+    "hook_angle": "the core angle of this video",
+    "slides": [
+        {{"text": "short screen text max 8 words", "duration": 4, "emphasis": true}},
+        {{"text": "next slide text", "duration": 5, "emphasis": false}}
+    ],
+    "full_voiceover": "the complete spoken script using the user's exact words and style"
+}}
+
+Use the user's actual words and voice in the voiceover.
+Keep slide text short - it appears on screen.
+Create as many slides as needed to cover the full script."""
+    return parse_claude_json(call_claude(prompt))
 
 
 # ════════════════════════════════════════════════════
-# PIPELINE RUNNER
+# MAIN PIPELINE
 # ════════════════════════════════════════════════════
-def run_pipeline(mode: str, **kwargs):
-    """Runs the full pipeline with progress UI"""
-    
-    import anthropic
-    import requests
-    from PIL import Image, ImageDraw, ImageFont
-    import subprocess
-    
+
+def run_pipeline(script_data: dict, label: str):
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
-    
-    # Progress UI
+
     progress = st.progress(0)
     status = st.empty()
-    
-    try:
-        # ── STEP 1: Script ───────────────────────────
-        status.info("✍️  Step 1/4: Preparing script...")
-        progress.progress(10)
-        
-        if mode == "script":
-            script_data = parse_user_script(
-                kwargs["script_text"],
-                kwargs.get("visual_text", ""),
-                kwargs["title"],
-                kwargs["anthropic_key"]
-            )
-        else:
-            script_data = generate_topic_script(
-                kwargs["topic"],
-                kwargs.get("your_style", ""),
-                kwargs["niche"],
-                kwargs["anthropic_key"]
-            )
-        
-        progress.progress(25)
-        
-        # Show script preview
-        with st.expander("📄 Script Preview"):
-            st.write(f"**Title:** {script_data['title']}")
-            st.write(f"**Hook angle:** {script_data.get('hook_angle', 'N/A')}")
-            for i, slide in enumerate(script_data['slides']):
-                st.write(f"Slide {i+1}: {slide['text']}")
-        
-        # ── STEP 2: Voice ────────────────────────────
-        status.info("🎙️  Step 2/4: Generating voiceover...")
-        progress.progress(35)
-        
-        voice_map = {
-            "Rachel (F, calm)":      "21m00Tcm4TlvDq8ikWAM",
-            "Adam (M, confident)":   "pNInz6obpgDQGcFmaJgB",
-            "Domi (F, energetic)":   "AZnzlk1XvdvUeBnXmlld",
-            "Bella (F, warm)":       "EXAVITQu4vr4xnSDxMaL"
-        }
-        
-        voice_id = voice_map.get(
-            kwargs.get("voice", "Rachel (F, calm)"),
-            "21m00Tcm4TlvDq8ikWAM"
-        )
-        
-        safe_title = "".join(
-            c for c in script_data["title"] 
-            if c.isalnum() or c in " -_"
-        )[:50]
-        
-        audio_path = str(output_dir / f"{safe_title}.mp3")
-        
-        voice_response = requests.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-            headers={
-                "xi-api-key": kwargs["elevenlabs_key"],
-                "Content-Type": "application/json"
-            },
-            json={
-                "text": script_data["full_voiceover"],
-                "model_id": "eleven_turbo_v2",
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.75
-                }
-            }
-        )
-        
-        if voice_response.status_code != 200:
-            st.error(f"Voice failed: {voice_response.text}")
-            return
-        
-        with open(audio_path, "wb") as f:
-            f.write(voice_response.content)
-        
-        progress.progress(50)
-        
-        # ── STEP 3: Visuals ──────────────────────────
-        status.info("🎨  Step 3/4: Building visuals...")
-        progress.progress(55)
-        
-        # Get background if stock footage selected
-        bg_path = None
-        if kwargs.get("bg_style") == "Stock footage":
-            bg_path = str(output_dir / f"{safe_title}_bg.mp4")
-            bg_path = fetch_background(
-                script_data.get("bg_search", "abstract dark"),
-                bg_path,
-                kwargs["pex
+    template = TEMPLATES[niche]
+    voice_id = VOICE_MAP[voice]
+    fname = safe_filename(script_data["title"])
+
+    with tempfile.TemporaryDirectory
